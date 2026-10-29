@@ -105,19 +105,19 @@ class FaLabel(Label):
             kw.setdefault("size_hint_y", None if auto_h else 1)
         super().__init__(font_name=FONT, font_size=self._fs, color=Theme.c(color), halign=align, valign="middle",
                          bold=bold, **kw)
-        self.bind(width=self._layout)
+        self.bind(width=self._relayout)
         if not auto_h:
-            self.bind(height=self._layout)
-        self._layout()
+            self.bind(height=self._relayout)
+        self._relayout()
 
     def set(self, text: str, color: str | None = None):
         self.ltext = text
         if color:
             self._ckey = color
             self.color = Theme.c(color)
-        self._layout()
+        self._relayout()
 
-    def _layout(self, *_):
+    def _relayout(self, *_):
         w = self.width
         if w <= 4:
             return
@@ -147,6 +147,8 @@ class SkinMixin:
 
     def _skin_update(self, *_):
         w, h = int(self.width), int(self.height)
+        if hasattr(self, "do_layout"):
+            self.do_layout()
         if w < 8 or h < 8:
             return
         self._skin_rect.pos = self.pos
@@ -179,7 +181,7 @@ class NeuBox(SkinMixin, BoxLayout):
             self.bind(minimum_height=self.setter("height"))
 
 
-class NeuButton(ButtonBehavior, SkinMixin, FloatLayout):
+class NeuButton(ButtonBehavior, SkinMixin, BoxLayout):
     """kind: plain | primary | round | seg | tile."""
 
     def __init__(self, text="", kind="plain", size=15, color=None, **kw):
@@ -222,17 +224,20 @@ class NeuButton(ButtonBehavior, SkinMixin, FloatLayout):
         self._label.set(self._label.ltext, "accent" if on else "text")
 
 
-class Tile(ButtonBehavior, SkinMixin, FloatLayout):
+class Tile(ButtonBehavior, SkinMixin, BoxLayout):
     """کاشی اصلی: دایره‌ی رنگی با نماد + عنوان + زیرعنوان."""
 
     def __init__(self, title: str, icon: str, accent: str, **kw):
         kw.setdefault("size_hint_y", None)
         kw.setdefault("height", dp(124))
+        kw.setdefault("orientation", "vertical")
+        kw.setdefault("padding", [mg() + dp(10)] * 4)
+        kw.setdefault("spacing", dp(2))
         super().__init__(**kw)
         self._init_skin("tile")
         self.accent = accent
         self.icon = icon
-        box = BoxLayout(orientation="vertical", padding=[mg() + dp(10)] * 4, spacing=dp(2))
+        box = self
         top = BoxLayout(size_hint_y=None, height=dp(44))
         self._ic = Label(text=icon, font_name=FONT, font_size=sp(20), color=(1, 1, 1, 1), size_hint=(None, 1),
                          width=dp(44))
@@ -247,7 +252,6 @@ class Tile(ButtonBehavior, SkinMixin, FloatLayout):
         self.sub = FaLabel("", size=12, color="muted", auto_h=False, wrap=False, size_hint=(1, None), height=dp(22))
         box.add_widget(self.title)
         box.add_widget(self.sub)
-        self.add_widget(box)
         self.bind(state=lambda *_: self.set_skin(pressed=(self.state == "down")))
 
     def _ic_upd(self, *_):
@@ -380,7 +384,9 @@ class SquareImage(Image):
         kw.setdefault("size_hint_y", None)
         kw.setdefault("fit_mode", "contain")
         super().__init__(**kw)
+        self.opacity = 0                      # بدون بافت، Image مستطیل سفید می‌کشد
         self.bind(width=lambda w, v: setattr(w, "height", v))
+        self.bind(texture=lambda w, t: setattr(w, "opacity", 1 if t is not None else 0))
 
 
 class TouchImage(Image):

@@ -151,6 +151,7 @@ class DateStudio(App):
         self.fonts_dir = os.path.join(self.user_data_dir, "fonts")
         self.tpl_dir = os.path.join(self.user_data_dir, "templates")
         self.fonts = self._font_list()
+        self._scan_system_fonts()
         self.pages: list[Page] = []
         self._busy = False
         self._pv_running = self._pv_dirty = False
@@ -166,23 +167,46 @@ class DateStudio(App):
         return self.root_fl
 
     def _font_list(self) -> list[str]:
+        """فونت‌های همراه برنامه (assets/fonts) + فونت‌های افزوده‌شده توسط کاربر + فونت‌های عربی/فارسی سیستم."""
         out = []
-        b = Path(bundled_font_dir())
-        out += [str(b / "DejaVuSans-Bold.ttf"), str(b / "DejaVuSans.ttf")]
-        for d in (self.fonts_dir,):
-            if os.path.isdir(d):
-                out += sorted(str(p) for p in Path(d).iterdir() if p.suffix.lower() in (".ttf", ".otf"))
-        sysd = Path("/system/fonts")
-        if sysd.is_dir():
-            pick = [p for p in sorted(sysd.iterdir()) if p.suffix.lower() == ".ttf" and any(
-                k in p.name.lower() for k in ("naskh", "arab", "kufi", "vazir", "roboto-", "droidsans"))]
-            out += [str(p) for p in pick[:14]]
+        here = Path(__file__).resolve().parent
+        for d in (Path(bundled_font_dir()), here / "assets" / "fonts", here / "assets" / "ui_fonts", Path(self.fonts_dir)):
+            if d.is_dir():
+                out += sorted(str(p) for p in d.iterdir() if p.suffix.lower() in (".ttf", ".otf"))
         seen, res = set(), []
         for p in out:
-            if p not in seen and os.path.exists(p):
-                seen.add(p)
+            key = os.path.basename(p).lower()
+            if key not in seen and os.path.exists(p):
+                seen.add(key)
                 res.append(p)
         return res
+
+    def _scan_system_fonts(self):
+        """فونت‌های سیستم اندروید که حروف فارسی دارند (در پس‌زمینه بررسی می‌شود)."""
+        def work():
+            try:
+                from fontTools.ttLib import TTFont
+            except Exception:  # noqa: BLE001
+                return
+            found = []
+            for d in ("/system/fonts", "/system/font", "/product/fonts"):
+                if not os.path.isdir(d):
+                    continue
+                for name in sorted(os.listdir(d)):
+                    if not name.lower().endswith((".ttf", ".otf")):
+                        continue
+                    p = os.path.join(d, name)
+                    try:
+                        cm = TTFont(p, lazy=True).getBestCmap() or {}
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if 0x0628 in cm and 0x067E in cm:                  # ب و پ
+                        found.append(p)
+            def add():
+                have = {os.path.basename(x).lower() for x in self.fonts}
+                self.fonts += [p for p in found if os.path.basename(p).lower() not in have]
+            self._ui(add)
+        threading.Thread(target=work, daemon=True).start()
 
     # =========================================================== کمکی
     def _ui(self, fn, *a):

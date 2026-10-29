@@ -4,10 +4,10 @@ package.name = datestudio
 package.domain = org.datestudio
 source.dir = .
 source.include_exts = py,png,ttf,otf,tgs,json,txt
-source.include_patterns = assets/*,src/*,src/*/*
+source.include_patterns = assets/*,assets/*/*,src/*,src/*/*,fontTools/*,fontTools/*/*,fontTools/*/*/*
 source.exclude_dirs = bin,.buildozer,__pycache__
 version = 0.1.0
-requirements = python3,kivy==2.3.0,pillow,numpy,fonttools,plyer,pyjnius,android
+requirements = python3,kivy==2.3.0,pillow,numpy,plyer,pyjnius,android
 orientation = portrait
 fullscreen = 0
 android.permissions = WRITE_EXTERNAL_STORAGE
