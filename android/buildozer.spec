@@ -10,7 +10,7 @@ version = 0.1.0
 requirements = python3,kivy==2.3.0,pillow,numpy,fonttools,plyer,pyjnius,android
 orientation = portrait
 fullscreen = 0
-android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,READ_MEDIA_IMAGES
+android.permissions = WRITE_EXTERNAL_STORAGE
 android.api = 33
 android.minapi = 24
 android.archs = arm64-v8a

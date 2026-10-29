@@ -1,160 +1,182 @@
-"""Telegram Date Studio — نسخه‌ی اندروید (Kivy). تمام منطق در src/mobile/core.py است."""
+"""Telegram Date Studio — نسخه‌ی اندروید (Kivy)، هم‌ظاهر با نسخه‌ی ویندوز: چهار کاشی، صفحه‌های درون‌پنجره‌ای، تم روشن/شب.
+تمام منطق در src/mobile/core.py است؛ این فایل فقط رابط است."""
 from __future__ import annotations
 
 import os
 import sys
-import textwrap
 import threading
 import traceback
-from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # اجرای مستقیم در ریپو (روی کامپیوتر)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))      # اجرای مستقیم در ریپو (کامپیوتر)
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.core.image import Image as CoreImage
 from kivy.core.text import LabelBase
-from kivy.metrics import dp
+from kivy.core.window import Window
+from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.metrics import dp, sp
+from kivy.uix.anchorlayout import AnchorLayout
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
 from kivy.uix.filechooser import FileChooserListView
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.gridlayout import GridLayout
 from kivy.uix.image import Image
-from kivy.uix.label import Label
-from kivy.uix.popup import Popup
-from kivy.uix.progressbar import ProgressBar
+from kivy.uix.modalview import ModalView
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
-from kivy.uix.spinner import Spinner, SpinnerOption
 
 import platform_android as plat
-from src.mobile.core import MONTHS, Project
-from src.mobile.rtl import visual
+from src.mobile.core import MONTHS, Project, load_state, save_state
+from src.mobile.samples import EN_PROBE, FA_PROBE, SAMPLE_EN, SAMPLE_FA, missing_chars, sample_image
+from src.png.session import annotated_image, blob_at
+from src.calendars.jalali import day_info
+from src.tgs.replacer import KASHIDA_SLOTS
 from src.vector_text.fonts import bundled_font_dir
 
-FONT_UI = os.path.join(bundled_font_dir(), "DejaVuSans.ttf")      # دارای فرم‌های نمایشیِ عربی/فارسی
-LabelBase.register(name="UI", fn_regular=FONT_UI)
-ORANGE = (1.0, 0.55, 0.15, 1)
+import ui_kit
+from ui_kit import (Bar, FaLabel, NeuBox, NeuButton, SegBar, SquareImage, Stepper, Theme, Tile, TouchImage,
+                    to_texture)
+from src.mobile import neu_img
 
 
-class UIOption(SpinnerOption):
-    font_name = "UI"          # گزینه‌های فارسیِ منوی بازشو هم با فونت دارای فرم‌های نمایشی
+# ---------------------------------------------------------------- فونت رابط
+def _has_forms(path: str) -> bool:
+    """آیا فونت فرم‌های نمایشی عربی (برای شکل‌دهی دستی در Kivy) را دارد؟"""
+    try:
+        from fontTools.ttLib import TTFont
+        cmap = TTFont(path, lazy=True).getBestCmap() or {}
+        return all(c in cmap for c in (0xFEB3, 0xFEE3, 0xFE8D, 0xFEED))
+    except Exception:  # noqa: BLE001
+        return False
 
 
-def fa(text: str, width: int = 34) -> str:
-    """متن منطقیِ فارسی → متن قابل‌نمایش (شکل‌دهی + راست‌به‌چپ + شکستن خط)."""
-    lines = []
-    for ln in str(text).split("\n"):
-        lines += textwrap.wrap(ln, width) or [""]
-    return visual("\n".join(lines))
+def pick_ui_font() -> tuple[str, str]:
+    here = Path(__file__).resolve().parent
+    for d in (here / "assets" / "ui_fonts", here.parent / "assets" / "ui_fonts"):
+        if d.is_dir():
+            for p in sorted(d.iterdir()):
+                if p.suffix.lower() in (".ttf", ".otf") and _has_forms(str(p)):
+                    return str(p), str(p)
+    b = bundled_font_dir()
+    return os.path.join(b, "DejaVuSans.ttf"), os.path.join(b, "DejaVuSans-Bold.ttf")
 
 
-def lbl(text="", **kw) -> Label:
-    kw.setdefault("font_name", "UI")
-    kw.setdefault("halign", "right")
-    kw.setdefault("size_hint_y", None)
-    l = Label(text=fa(text) if kw.pop("shape", True) else text, **kw)
-    l.bind(width=lambda w, _v: setattr(w, "text_size", (w.width, None)))
-    l.bind(texture_size=lambda w, ts: setattr(w, "height", max(ts[1] + dp(8), dp(28))))
-    return l
+_reg, _bold = pick_ui_font()
+LabelBase.register(name=ui_kit.FONT, fn_regular=_reg, fn_bold=_bold)
 
 
-def btn(text, cb, primary=False, **kw) -> Button:
-    b = Button(text=fa(text), font_name="UI", size_hint_y=None, height=dp(52),
-               background_normal="", background_color=ORANGE if primary else (0.25, 0.25, 0.3, 1), **kw)
-    b.bind(on_release=lambda *_: cb())
-    return b
+class FontRow(ButtonBehavior, BoxLayout):
+    """یک ردیف فهرست فونت: نام (بالا) + نمونه‌ی متن با همان فونت (پایین)."""
+
+    def __init__(self, path: str, title: str, **kw):
+        kw.setdefault("orientation", "vertical")
+        kw.setdefault("size_hint_y", None)
+        kw.setdefault("height", dp(88))
+        kw.setdefault("padding", [dp(14), dp(6)])
+        super().__init__(**kw)
+        self.path, self.selected = path, False
+        with self.canvas.before:
+            self._col = Color(0, 0, 0, 0)
+            self._bg = RoundedRectangle(radius=[dp(16)])
+        self.bind(pos=self._upd, size=self._upd)
+        self.name_lbl = FaLabel(title, size=12, color="muted", auto_h=False, wrap=False, size_hint=(1, None),
+                                height=dp(22))
+        self.add_widget(self.name_lbl)
+        self.holder = AnchorLayout(anchor_x="right", anchor_y="center")
+        self.add_widget(self.holder)
+
+    def _upd(self, *_):
+        self._bg.pos, self._bg.size = self.pos, self.size
+
+    def mark(self, on: bool):
+        self.selected = on
+        self._col.rgba = Theme.c("accent", 0.14) if on else (0, 0, 0, 0)
+        self.name_lbl.set(self.name_lbl.ltext, "accent" if on else "muted")
+
+    def set_sample(self, tex):
+        self.holder.clear_widgets()
+        self.holder.add_widget(Image(texture=tex, size_hint=(None, None), size=tex.size))
+
+
+class Page(FloatLayout):
+    """صفحه‌ی درون‌پنجره‌ای: نوار بالا با «بازگشت» و عنوان، محتوا، و دکمه‌ی «تأیید»."""
+
+    def __init__(self, app, title: str, scroll: bool = False, **kw):
+        super().__init__(**kw)
+        self.app = app
+        with self.canvas.before:
+            Color(*Theme.c("bg"))
+            self._bg = Rectangle()
+        self.bind(pos=lambda *_: setattr(self._bg, "pos", self.pos), size=lambda *_: setattr(self._bg, "size", self.size))
+        root = BoxLayout(orientation="vertical", padding=[dp(14), dp(14), dp(14), dp(10)], spacing=dp(10))
+        top = BoxLayout(size_hint_y=None, height=dp(64), spacing=dp(8))
+        top.add_widget(FaLabel(title, size=19, bold=True, auto_h=False))
+        back = NeuButton("›", "round", size=26)
+        back.bind(on_release=lambda *_: app.close_page())
+        top.add_widget(back)
+        root.add_widget(top)
+        if scroll:
+            sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
+            self.inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10), padding=[0, 0, dp(4), dp(8)])
+            self.inner.bind(minimum_height=self.inner.setter("height"))
+            sv.add_widget(self.inner)
+            root.add_widget(sv)
+        else:
+            self.inner = BoxLayout(orientation="vertical", spacing=dp(10))
+            root.add_widget(self.inner)
+        ok = NeuButton("تأیید", "primary", size=17)
+        ok.bind(on_release=lambda *_: app.close_page())
+        root.add_widget(ok)
+        self.add_widget(root)
+        self.on_close = None
 
 
 class DateStudio(App):
     title = "Telegram Date Studio"
 
+    # =========================================================== ساخت
     def build(self):
+        if not plat.on_android():
+            Window.size = (440, 860)
         plat.request_permissions()
+        self.state_path = os.path.join(self.user_data_dir, "state.json")
+        self.crash_path = os.path.join(self.user_data_dir, "crash.log")
+        st = load_state(self.state_path)
+        Theme.set("dark" if st.get("theme") == "dark" else "light")
+        Window.clearcolor = Theme.c("bg")
         self.proj = Project()
-        self.jy, self.jm = 1405, 8
+        self.fonts_dir = os.path.join(self.user_data_dir, "fonts")
+        self.tpl_dir = os.path.join(self.user_data_dir, "templates")
         self.fonts = self._font_list()
-        self.last_files: list[str] = []
+        self.pages: list[Page] = []
         self._busy = False
-        self._pv_token = 0
+        self._pv_running = self._pv_dirty = False
+        self._last_pv = (None, "")
         self._zip_uri = None
+        self._tpl_kind = "muted"
+        self.frame = None
+        self.root_fl = FloatLayout()
+        self._build_main()
+        self.root_fl.add_widget(self.main)
+        Window.bind(on_keyboard=self._on_key)
+        Clock.schedule_once(lambda _dt: self._restore_async(st), 0.3)
+        return self.root_fl
 
-        root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
-        sv = ScrollView(do_scroll_x=False)
-        self.col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
-        self.col.bind(minimum_height=self.col.setter("height"))
-        sv.add_widget(self.col)
-        root.add_widget(sv)
-
-        c = self.col
-        c.add_widget(lbl("ساخت استیکر تاریخ", font_size=dp(22), bold=True))
-        c.add_widget(btn("انتخاب قالب (PNG یا TGS)", self.pick_template, primary=True))
-        self.status = lbl("هنوز قالبی انتخاب نشده است.", font_size=dp(14))
-        c.add_widget(self.status)
-
-        # ماه و سال
-        row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(6))
-        self.sp_month = Spinner(text=fa(MONTHS[self.jm - 1]), values=[fa(m) for m in MONTHS], font_name="UI", option_cls=UIOption,
-                                background_normal="", background_color=(0.25, 0.25, 0.3, 1))
-        self.sp_month.bind(text=lambda *_: self._month_changed())
-        self.b_year_dn = Button(text="−", size_hint_x=None, width=dp(52), on_release=lambda *_: self._year(-1))
-        self.b_year_up = Button(text="+", size_hint_x=None, width=dp(52), on_release=lambda *_: self._year(+1))
-        self.l_year = Label(text=str(self.jy), size_hint_x=None, width=dp(70))
-        for w in (self.b_year_up, self.l_year, self.b_year_dn, self.sp_month):
-            row.add_widget(w)
-        c.add_widget(lbl("ماه و سال", font_size=dp(13)))
-        c.add_widget(row)
-
-        # فونت‌ها
-        names = [Path(p).stem for p in self.fonts]
-        c.add_widget(lbl("فونت (فارسی و انگلیسی)", font_size=dp(13)))
-        self.sp_font = Spinner(text=names[0], values=names, size_hint_y=None, height=dp(48))
-        self.sp_font.bind(text=lambda *_: self._font_changed())
-        c.add_widget(self.sp_font)
-        c.add_widget(lbl("فونت‌های بیشتر: فایل .ttf را در حافظه‌ی گوشی داخل TelegramDateStudio/fonts بگذارید و برنامه را دوباره باز کنید.",
-                         font_size=dp(11)))
-
-        # اندازه و کشیدگی
-        self.l_size = lbl("اندازه‌ی نوشته‌ها: ۱۰۰٪", font_size=dp(13))
-        c.add_widget(self.l_size)
-        self.sl_size = Slider(min=50, max=150, value=100, step=5, size_hint_y=None, height=dp(40))
-        self.sl_size.bind(value=lambda *_: self._size_changed())
-        c.add_widget(self.sl_size)
-        c.add_widget(lbl("کشیدگی حروف (شـنـبـه)", font_size=dp(13)))
-        self.kash_vals = ["خودکار", "۰", "۱", "۲", "۳", "۴", "۵"]
-        self.sp_kash = Spinner(text=fa("خودکار"), values=[fa(v) for v in self.kash_vals], font_name="UI", option_cls=UIOption,
-                               size_hint_y=None, height=dp(48))
-        self.sp_kash.bind(text=lambda *_: self._kash_changed())
-        c.add_widget(self.sp_kash)
-
-        # پیش‌نمایش
-        self.preview = Image(size_hint_y=None, height=dp(340), fit_mode="contain")
-        c.add_widget(self.preview)
-        self.pv_info = lbl("", font_size=dp(12))
-        c.add_widget(self.pv_info)
-
-        # ساخت
-        self.b_gen = btn("ساخت استیکرهای این ماه", self.start_batch, primary=True)
-        c.add_widget(self.b_gen)
-        self.bar = ProgressBar(max=1, value=0, size_hint_y=None, height=dp(10))
-        c.add_widget(self.bar)
-        self.result = lbl("", font_size=dp(13))
-        c.add_widget(self.result)
-        self.b_share = btn("اشتراک‌گذاری ZIP", self.share)
-        self.b_share.disabled = True
-        c.add_widget(self.b_share)
-        return root
-
-    # ------------------------------------------------------------ کمکی
     def _font_list(self) -> list[str]:
-        out = [os.path.join(bundled_font_dir(), "DejaVuSans-Bold.ttf")]
-        out += sorted(str(p) for p in Path(bundled_font_dir()).glob("*.ttf") if str(p) not in out)
-        d = plat.user_fonts_dir()
-        try:
-            out += sorted(str(p) for p in Path(d).glob("*.ttf")) + sorted(str(p) for p in Path(d).glob("*.otf"))
-        except Exception:  # noqa: BLE001
-            pass
+        out = []
+        b = Path(bundled_font_dir())
+        out += [str(b / "DejaVuSans-Bold.ttf"), str(b / "DejaVuSans.ttf")]
+        for d in (self.fonts_dir,):
+            if os.path.isdir(d):
+                out += sorted(str(p) for p in Path(d).iterdir() if p.suffix.lower() in (".ttf", ".otf"))
+        sysd = Path("/system/fonts")
+        if sysd.is_dir():
+            pick = [p for p in sorted(sysd.iterdir()) if p.suffix.lower() == ".ttf" and any(
+                k in p.name.lower() for k in ("naskh", "arab", "kufi", "vazir", "roboto-", "droidsans"))]
+            out += [str(p) for p in pick[:14]]
         seen, res = set(), []
         for p in out:
             if p not in seen and os.path.exists(p):
@@ -162,152 +184,654 @@ class DateStudio(App):
                 res.append(p)
         return res
 
+    # =========================================================== کمکی
     def _ui(self, fn, *a):
         Clock.schedule_once(lambda _dt: fn(*a))
 
-    def _error(self, e: Exception):
+    def _log(self, e: BaseException):
+        try:
+            with open(self.crash_path, "a", encoding="utf-8") as f:
+                f.write(traceback.format_exc() + "\n")
+        except Exception:  # noqa: BLE001
+            pass
         traceback.print_exc()
-        self.result.text = fa("✘ " + str(e))
 
-    # ------------------------------------------------------------ قالب
+    def err(self, e: BaseException):
+        self._log(e)
+        self.result.set("✘ " + str(e)[:300], "err")
+        self._show_crash(e)
+
+    def _show_crash(self, e: BaseException):
+        """خطا را با جزئیات روی صفحه نشان می‌دهد (برای فرستادن به توسعه‌دهنده)."""
+        from kivy.uix.label import Label
+        mv = ModalView(size_hint=(0.94, 0.7))
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(6))
+        txt = "".join(traceback.format_exception(type(e), e, e.__traceback__))[-1800:]
+        lbl = Label(text=txt, font_name="Roboto", font_size=sp(10), halign="left", valign="top", size_hint_y=None)
+        lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+        lbl.bind(texture_size=lambda w, ts: setattr(w, "height", ts[1]))
+        sv = ScrollView()
+        sv.add_widget(lbl)
+        box.add_widget(sv)
+        b = NeuButton("بستن", "plain")
+        b.bind(on_release=lambda *_: mv.dismiss())
+        box.add_widget(b)
+        mv.add_widget(box)
+        mv.open()
+
+    def save(self):
+        save_state(self.proj, self.state_path, {"theme": Theme.pal.name})
+
+    def _stem(self, p: str) -> str:
+        return Path(p).stem
+
+    # =========================================================== صفحه‌ی اصلی
+    def _build_main(self):
+        sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10), padding=[dp(14), dp(16), dp(14), dp(28)])
+        col.bind(minimum_height=col.setter("height"))
+        sv.add_widget(col)
+        self.main = sv
+
+        head = BoxLayout(size_hint_y=None, height=dp(72), spacing=dp(8))
+        titles = BoxLayout(orientation="vertical")
+        titles.add_widget(FaLabel("Telegram Date Studio", size=20, bold=True, auto_h=False, wrap=False))
+        titles.add_widget(FaLabel("ساخت استیکر تاریخ برای یک ماه کامل", size=12, color="muted", auto_h=False, wrap=False))
+        head.add_widget(titles)
+        self.mode_btn = NeuButton("☾" if Theme.pal.name == "light" else "☀", "round", size=22)
+        self.mode_btn.bind(on_release=lambda *_: self.toggle_theme())
+        head.add_widget(self.mode_btn)
+        col.add_widget(head)
+
+        grid = GridLayout(cols=2, size_hint_y=None, spacing=dp(2), row_default_height=dp(124), row_force_default=True)
+        grid.bind(minimum_height=grid.setter("height"))
+        self.t_tpl = Tile("قالب", "▣", "accent")
+        self.t_font = Tile("فونت‌ها", "A", "violet")
+        self.t_month = Tile("ماه و سال", "▦", "teal")
+        self.t_size = Tile("اندازه‌ها", "⇔", "pink")
+        self.t_tpl.bind(on_release=lambda *_: self.page_template())
+        self.t_font.bind(on_release=lambda *_: self.page_fonts())
+        self.t_month.bind(on_release=lambda *_: self.page_month())
+        self.t_size.bind(on_release=lambda *_: self.page_sizes())
+        for t in (self.t_font, self.t_tpl, self.t_size, self.t_month):         # راست‌به‌چپ: قالب بالا-راست
+            grid.add_widget(t)
+        col.add_widget(grid)
+
+        card = NeuBox("inset", pad=6)
+        self.pv_img = SquareImage()
+        card.add_widget(self.pv_img)
+        col.add_widget(card)
+        self.slider = Slider(min=0, max=1, value=0, size_hint_y=None, height=dp(40), value_track=True,
+                             value_track_color=Theme.c("accent"), value_track_width=dp(4), cursor_size=(dp(26), dp(26)))
+        self.slider.bind(value=self._on_slider)
+        col.add_widget(self.slider)
+        self.pv_info = FaLabel("", size=12, color="muted", align="center")
+        col.add_widget(self.pv_info)
+
+        self.fields_btn = NeuButton("تعیین نوشته‌ها روی استیکر ثابت", "plain", size=14)
+        self.fields_btn.bind(on_release=lambda *_: self.page_png_fields())
+        col.add_widget(self.fields_btn)
+        self.gen_btn = NeuButton("ساخت استیکرهای این ماه", "primary", size=17)
+        self.gen_btn.disabled = True
+        self.gen_btn.bind(on_release=lambda *_: self.start_batch())
+        col.add_widget(self.gen_btn)
+        self.bar = Bar()
+        col.add_widget(self.bar)
+        self.result = FaLabel("", size=13, color="muted")
+        col.add_widget(self.result)
+        self.share_btn = NeuButton("اشتراک‌گذاری ZIP", "plain", size=14)
+        self.share_btn.bind(on_release=lambda *_: self.share())
+        col.add_widget(self.share_btn)
+        self._toggle(self.fields_btn, False)
+        self._toggle(self.share_btn, False)
+        self._toggle(self.slider, False)
+        self._refresh_tiles()
+
+    @staticmethod
+    def _toggle(w, on: bool):
+        if not hasattr(w, "_h0"):
+            w._h0 = w.height
+        w.opacity = 1 if on else 0
+        w.disabled = not on
+        w.height = w._h0 if on else 0
+
+    def _refresh_tiles(self):
+        p = self.proj
+        self.t_tpl.set_sub(p.name if p.ok else "انتخاب نشده", p.ok)
+        self.t_font.set_sub(f"{self._stem(p.fa_font)} · {self._stem(p.en_font)}", True)
+        self.t_month.set_sub(f"{MONTHS[p.jm - 1]} {p.jy}", True)
+        n = len(p.slot_names())
+        self.t_size.set_sub(f"{n} نوشته" if n else "پس از انتخاب قالب", bool(n))
+
+    def toggle_theme(self):
+        Theme.set("light" if Theme.pal.name == "dark" else "dark")
+        Window.clearcolor = Theme.c("bg")
+        self.save()
+        for pg in list(self.pages):
+            self.root_fl.remove_widget(pg)
+        self.pages.clear()
+        self.root_fl.remove_widget(self.main)
+        self._build_main()
+        self.root_fl.add_widget(self.main)
+        self._after_load_ui()
+        im, info = self._last_pv
+        if im is not None:
+            self.pv_img.texture = im
+            self.pv_info.set(info)
+
+    # =========================================================== صفحه‌ها
+    def open_page(self, pg: Page):
+        self.pages.append(pg)
+        self.root_fl.add_widget(pg)
+
+    def close_page(self):
+        if not self.pages:
+            return
+        pg = self.pages.pop()
+        self.root_fl.remove_widget(pg)
+        if pg.on_close:
+            try:
+                pg.on_close()
+            except Exception as e:  # noqa: BLE001
+                self._log(e)
+        self._refresh_tiles()
+        self.save()
+
+    def _on_key(self, _win, key, *_a):
+        if key == 27 and self.pages:                  # دکمه‌ی بازگشت اندروید
+            self.close_page()
+            return True
+        return False
+
+    # ---- قالب
+    def page_template(self):
+        pg = Page(self, "قالب استیکر", scroll=True)
+        b = NeuButton("انتخاب فایل قالب (.png یا .tgs)", "plain")
+        b.bind(on_release=lambda *_: self.pick_template())
+        pg.inner.add_widget(b)
+        self.tpl_status = FaLabel(self.proj.message, size=13, color=self._tpl_kind)
+        pg.inner.add_widget(self.tpl_status)
+        fb = NeuButton("تعیین نوشته‌ها روی استیکر ثابت", "plain", size=14)
+        fb.bind(on_release=lambda *_: (self.close_page(), self.page_png_fields()))
+        pg.inner.add_widget(fb)
+        if self.proj.kind != "png":
+            self._toggle(fb, False)
+        self.open_page(pg)
+
+    def pick_file(self, subdir: str, on_path):
+        dest = os.path.join(self.user_data_dir, subdir)
+
+        def done(path, err):
+            self._ui(lambda: on_path(path, err))
+        if plat.pick_document(done, dest):
+            return
+        if plat.on_android():
+            on_path(None, "انتخابگر فایل در دسترس نیست")
+            return
+        start = str(Path.home())
+        fc = FileChooserListView(path=start, filters=["*.png", "*.tgs", "*.ttf", "*.otf"])
+        mv = ModalView(size_hint=(0.95, 0.9))
+        mv.add_widget(fc)
+        fc.bind(on_submit=lambda _f, sel, _t: (mv.dismiss(), on_path(sel[0], "")) if sel else None)
+        mv.open()
+
     def pick_template(self):
-        if not plat.pick_file(lambda p: self._ui(self.load_template, p) if p else None):
-            self._fallback_picker()
+        def got(path, err):
+            if err:
+                self._set_status("✘ " + err, "err")
+            elif path:
+                self.load_template(path, fresh=True)
+        self.pick_file("templates", got)
 
-    def _fallback_picker(self):
-        start = "/storage/emulated/0" if plat.on_android() else str(Path.home())
-        fc = FileChooserListView(path=start, filters=["*.png", "*.tgs"])
-        pop = Popup(title="Template", content=fc, size_hint=(0.95, 0.9))
-        fc.bind(on_submit=lambda _fc, sel, _t: (pop.dismiss(), self.load_template(sel[0])) if sel else None)
-        pop.open()
+    def _set_status(self, text: str, kind: str):
+        self._tpl_kind = kind
+        if getattr(self, "tpl_status", None) is not None:
+            try:
+                self.tpl_status.set(text, kind)
+            except Exception:  # noqa: BLE001
+                pass
 
-    def load_template(self, path: str):
-        self.status.text = fa("در حال تحلیل قالب …")
+    def load_template(self, path: str, fresh: bool = False, saved=None):
+        self._set_status("در حال تحلیل قالب …", "muted")
+
         def work():
-            msg = self.proj.load(path)
-            self._ui(self._loaded, msg)
+            try:
+                if fresh:
+                    self.proj.reset_adjustments()
+                msg = self.proj.load(path, saved)
+                self._ui(self._loaded, msg)
+            except Exception as e:  # noqa: BLE001
+                self._ui(self.err, e)
         threading.Thread(target=work, daemon=True).start()
 
     def _loaded(self, msg: str):
-        self.status.text = fa(msg)
-        self.b_gen.disabled = not self.proj.ok
-        self.refresh_preview()
+        kind = "err" if msg.startswith("✘") else "ok"
+        self._set_status(msg, kind)
+        self._after_load_ui()
+        self.refresh_preview(0.05)
+        self.save()
 
-    # ------------------------------------------------------------ تنظیمات
-    def _month_changed(self):
-        vals = list(self.sp_month.values)
-        if self.sp_month.text in vals:
-            self.jm = vals.index(self.sp_month.text) + 1
-            self.refresh_preview()
+    def _after_load_ui(self):
+        p = self.proj
+        self.gen_btn.disabled = not p.ok
+        self._toggle(self.fields_btn, p.ok and p.kind == "png")
+        if p.ok and p.kind == "tgs":
+            a, b = p.frame_range()
+            self.slider.min, self.slider.max = a, max(b, a + 1)
+            if self.frame is None:
+                self.frame = (a + b) // 2
+            self.slider.value = self.frame
+            self._toggle(self.slider, True)
+        else:
+            self._toggle(self.slider, False)
+        self._refresh_tiles()
 
-    def _year(self, d):
-        self.jy = max(1300, min(1700, self.jy + d))
-        self.l_year.text = str(self.jy)
-        self.refresh_preview()
-
-    def _font_changed(self):
-        names = [Path(p).stem for p in self.fonts]
-        if self.sp_font.text in names:
-            p = self.fonts[names.index(self.sp_font.text)]
-            self.proj.fa_font = self.proj.en_font = p
-            self.refresh_preview()
-
-    def _size_changed(self):
-        v = int(self.sl_size.value)
-        self.proj.scale_pct = v
-        self.l_size.text = fa(f"اندازه‌ی نوشته‌ها: {v}٪")
-        self._debounce_preview()
-
-    def _kash_changed(self):
-        vals = list(self.sp_kash.values)
-        i = vals.index(self.sp_kash.text) if self.sp_kash.text in vals else 0
-        self.proj.kashida_override = None if i == 0 else i - 1
-        self.refresh_preview()
-
-    def _debounce_preview(self):
-        Clock.unschedule(self._deb)
-        Clock.schedule_once(self._deb, 0.3)
-
-    def _deb(self, *_):
-        self.refresh_preview()
-
-    # ------------------------------------------------------------ پیش‌نمایش
-    def refresh_preview(self):
-        if not self.proj.ok:
-            return
-        self._pv_token += 1
-        token = self._pv_token
-        jy, jm = self.jy, self.jm
+    def _restore_async(self, st: dict):
         def work():
             try:
-                im, info = self.proj.preview(jy, jm, 1, 600)
-                buf = BytesIO()
-                im.convert("RGB").save(buf, "PNG")
-                buf.seek(0)
-                self._ui(self._show_preview, token, buf, info)
+                self.proj.restore(st)
+                self._ui(self._after_restore)
             except Exception as e:  # noqa: BLE001
-                self._ui(self._error, e)
+                self._log(e)
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_preview(self, token, buf, info):
-        if token != self._pv_token:
-            return
-        self.preview.texture = CoreImage(buf, ext="png").texture
-        self.pv_info.text = fa(info)
+    def _after_restore(self):
+        if self.proj.ok:
+            self._set_status(self.proj.message, "ok")
+            self._after_load_ui()
+            self.refresh_preview(0.05)
+        else:
+            self._refresh_tiles()
 
-    # ------------------------------------------------------------ ساخت ماهانه
+    # ---- فونت‌ها
+    def page_fonts(self):
+        pg = Page(self, "فونت‌ها")
+        proj = self.proj
+        names = proj.slot_names()
+        st = {"tab": 0, "slot": 0, "gen": 0, "rows": []}
+        bar = SegBar(["شمسی", "میلادی", "هر متن جدا"], lambda i: (st.__setitem__("tab", i), fill()))
+        pg.inner.add_widget(bar)
+        slot_step = Stepper(texts=names or ["—"], wrap=True, on_change=lambda v: (st.__setitem__("slot", v), fill()))
+        slot_step._h0 = slot_step.height
+        pg.inner.add_widget(slot_step)
+        self._toggle(slot_step, False)
+        sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        grid = GridLayout(cols=1, size_hint_y=None, spacing=dp(4), padding=[dp(2), dp(2)])
+        grid.bind(minimum_height=grid.setter("height"))
+        sv.add_widget(grid)
+        pg.inner.add_widget(sv)
+        warn = FaLabel(" ", size=12, color="err")
+        pg.inner.add_widget(warn)
+        add = NeuButton("افزودن فونت از حافظه‌ی گوشی …", "plain", size=14)
+        pg.inner.add_widget(add)
+
+        def current_path() -> str:
+            if st["tab"] == 0:
+                return proj.fa_font
+            if st["tab"] == 1:
+                return proj.en_font
+            return proj.slot_fonts.get(names[st["slot"]], "") if names else ""
+
+        def set_warn():
+            p = current_path()
+            if not p:
+                warn.set(" ")
+                return
+            probe, label = (EN_PROBE, "انگلیسی") if st["tab"] == 1 else (FA_PROBE, "فارسی")
+
+            def work():
+                miss = missing_chars(p, probe)
+                txt = (f"⚠ این فونت بعضی حروف {label} را ندارد: " + " ".join(miss[:10])) if miss else " "
+                self._ui(lambda: warn.set(txt))
+            threading.Thread(target=work, daemon=True).start()
+
+        def mark():
+            cur = current_path()
+            for r in st["rows"]:
+                r.mark(r.path == cur)
+
+        def picked(row: FontRow):
+            p = row.path
+            if st["tab"] == 0:
+                proj.fa_font = p
+            elif st["tab"] == 1:
+                proj.en_font = p
+            elif names:
+                if p:
+                    proj.slot_fonts[names[st["slot"]]] = p
+                else:
+                    proj.slot_fonts.pop(names[st["slot"]], None)
+            mark()
+            set_warn()
+            self.refresh_preview(0.2)
+
+        def fill():
+            st["gen"] += 1
+            gen = st["gen"]
+            self._toggle(slot_step, st["tab"] == 2 and bool(names))
+            grid.clear_widgets()
+            st["rows"] = []
+            items = ([("", "طبق تنظیم کلی")] if st["tab"] == 2 else []) + [(p, self._stem(p)) for p in self.fonts]
+            sample = SAMPLE_EN if st["tab"] == 1 else SAMPLE_FA
+            color = tuple(int(v * 255) for v in Theme.c("text")[:3])
+            hpx = int(sp(18))
+            for p, title in items:
+                r = FontRow(p, title)
+                r.bind(on_release=lambda row: picked(row))
+                grid.add_widget(r)
+                st["rows"].append(r)
+            mark()
+            set_warn()
+
+            def work():
+                for r in list(st["rows"]):
+                    if gen != st["gen"] or not r.path:
+                        continue
+                    try:
+                        im = sample_image(r.path, sample, color, hpx, int(Window.width * 0.8))
+                        tex = to_texture(im)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    self._ui(lambda r=r, tex=tex: r.set_sample(tex) if gen == st["gen"] else None)
+            threading.Thread(target=work, daemon=True).start()
+
+        def add_font(*_):
+            def got(path, err):
+                if err or not path:
+                    warn.set("✘ " + (err or "فایلی انتخاب نشد"), "err")
+                    return
+                if not path.lower().endswith((".ttf", ".otf")):
+                    warn.set("✘ فقط فایل .ttf یا .otf", "err")
+                    return
+                if path not in self.fonts:
+                    self.fonts.append(path)
+                fill()
+            self.pick_file("fonts", got)
+        add.bind(on_release=add_font)
+        fill()
+        self.open_page(pg)
+
+    # ---- ماه و سال
+    def page_month(self):
+        pg = Page(self, "ماه و سال", scroll=True)
+        proj = self.proj
+        info = FaLabel("", size=13, color="muted")
+
+        def upd(*_):
+            proj.jm, proj.jy = month.value + 1, year.value
+            d1 = day_info(proj.jy, proj.jm, 1)
+            info.set(f"۱ {d1.jalali_month_fa} = {d1.date.day} {d1.gregorian_month_en.capitalize()} {d1.date.year}")
+            self.refresh_preview(0.2)
+        month = Stepper(texts=MONTHS, value=proj.jm - 1, wrap=True, on_change=upd,
+                        on_wrap=lambda d: year.set_value(year.value + d))
+        year = Stepper(1300, 1700, proj.jy, on_change=upd)
+        pg.inner.add_widget(FaLabel("ماه", size=13, color="muted"))
+        pg.inner.add_widget(month)
+        pg.inner.add_widget(FaLabel("سال", size=13, color="muted"))
+        pg.inner.add_widget(year)
+        pg.inner.add_widget(info)
+        upd()
+        self.open_page(pg)
+
+    # ---- اندازه‌ها / جابه‌جایی / کشیدگی
+    def page_sizes(self):
+        pg = Page(self, "اندازه و جای نوشته‌ها", scroll=True)
+        proj = self.proj
+        names = proj.slot_names()
+        if not names:
+            pg.inner.add_widget(FaLabel("ابتدا یک قالب انتخاب کنید.", size=14, color="muted"))
+            self.open_page(pg)
+            return
+        kash_names = [n for n in names if n in KASHIDA_SLOTS]
+        labels = ["اندازه", "جابه‌جایی"] + (["کشیدگی"] if kash_names else [])
+        body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
+        body.bind(minimum_height=body.setter("height"))
+        hint = FaLabel("", size=12, color="muted")
+        steppers: dict = {}
+
+        def changed():
+            self.refresh_preview(0.25)
+
+        def show(i: int):
+            body.clear_widgets()
+            steppers.clear()
+            if i == 0:
+                hint.set("درصد اندازه‌ی هر متن نسبت به نوشته‌ی اصلی قالب.")
+                for n in names:
+                    body.add_widget(FaLabel(n, size=13, color="muted"))
+                    s = Stepper(30, 300, proj.sizes.get(n, 100), step=5, suffix="٪",
+                                on_change=lambda v, n=n: (proj.sizes.__setitem__(n, v), changed()))
+                    body.add_widget(s)
+            elif i == 1:
+                hint.set("↔ مثبت = به راست، ↕ مثبت = به پایین (پیکسل).")
+                for n in names:
+                    body.add_widget(FaLabel(n, size=13, color="muted"))
+                    x0, y0 = proj.offsets.get(n, (0, 0))
+                    row = BoxLayout(size_hint_y=None, height=dp(78), spacing=dp(4))
+                    sx = Stepper(-120, 120, x0, step=2, prefix="↔ ")
+                    sy = Stepper(-120, 120, y0, step=2, prefix="↕ ")
+                    steppers[n] = (sx, sy)
+
+                    def cb(_v, n=n):
+                        a, b = steppers[n]
+                        proj.offsets[n] = (a.value, b.value)
+                        changed()
+                    sx.on_change = sy.on_change = cb
+                    row.add_widget(sy)
+                    row.add_widget(sx)
+                    body.add_widget(row)
+            else:
+                hint.set("کشیدگی حروف: ۰ = ساده، ۳ = شـــنـــبـــه. به‌طور خودکار از روی قالب حدس زده می‌شود.")
+                for n in kash_names:
+                    body.add_widget(FaLabel(n, size=13, color="muted"))
+                    s = Stepper(0, 6, proj.kashida_of(n),
+                                on_change=lambda v, n=n: (proj.kash_user.__setitem__(n, v), changed()))
+                    body.add_widget(s)
+
+        pg.inner.add_widget(SegBar(labels, show))
+        pg.inner.add_widget(hint)
+        pg.inner.add_widget(body)
+        reset = NeuButton("بازگشت به حالت اصلی", "plain", size=14)
+
+        def do_reset(*_):
+            proj.reset_adjustments()
+            show(0)
+            changed()
+        reset.bind(on_release=do_reset)
+        pg.inner.add_widget(reset)
+        show(0)
+        self.open_page(pg)
+
+    # ---- نواحی استیکر ثابت
+    def page_png_fields(self):
+        proj = self.proj
+        if proj.kind != "png" or not proj.png:
+            return
+        pg = Page(self, "نوشته‌ها روی استیکر", scroll=True)
+        names = proj.all_slot_names()
+        st = {"assign": dict(proj.png_assign()), "ymd": list(proj.png_base()), "slot": 0}
+        info = FaLabel("", size=12, color="muted")
+        img = TouchImage(on_tap=lambda x, y: tap(x, y))
+        W, H = proj.png.img.size
+        img.img_size = (W, H)
+        img.bind(width=lambda w, v: setattr(w, "height", v * H / max(W, 1)))
+        digit_btn = NeuButton("", "plain", size=13)
+
+        def commit():
+            try:
+                proj.png_set(st["assign"], tuple(st["ymd"]))
+            except Exception:  # noqa: BLE001
+                return                           # تاریخِ نامعتبر (مثل ۳۱ اسفند)
+            self.refresh_preview(0.3)
+
+        def redraw():
+            cur = names[st["slot"]]
+            im = annotated_image(proj.png.img, proj.png.blobs, st["assign"], names, cur, 900)
+            img.texture = to_texture(im)
+            a = st["assign"].get(cur)
+            if a:
+                info.set(f"«{cur}» ← ناحیه‌ی {a[0].split('/')[-1]}")
+                digit_btn.set_text("ارقام: فارسی" if a[1] == "persian" else "ارقام: لاتین")
+            else:
+                info.set(f"«{cur}» هنوز ناحیه‌ای ندارد (اگر در این استیکر نیست، خالی بگذارید).")
+                digit_btn.set_text("ارقام: —")
+
+        def tap(ix, iy):
+            b = blob_at(proj.png.blobs, ix, iy)
+            if b is None:
+                return
+            cur = names[st["slot"]]
+            for k in [k for k, v in st["assign"].items() if v[0] == b.id and k != cur]:
+                del st["assign"][k]
+            st["assign"][cur] = (b.id, st["assign"].get(cur, (None, "keep"))[1])
+            redraw()
+            commit()
+
+        def toggle_digits(*_):
+            cur = names[st["slot"]]
+            if cur in st["assign"]:
+                bid, dg = st["assign"][cur]
+                st["assign"][cur] = (bid, "latin" if dg == "persian" else "persian")
+                redraw()
+                commit()
+
+        def clear(*_):
+            st["assign"].pop(names[st["slot"]], None)
+            redraw()
+            commit()
+
+        def auto(*_):
+            st["assign"] = {k: tuple(v) for k, v in proj.png_suggest(tuple(st["ymd"])).items()}
+            redraw()
+            commit()
+
+        def date_changed(_v):
+            st["ymd"] = [year.value, month.value + 1, day.value]
+            commit()
+
+        pg.inner.add_widget(FaLabel("۱) تاریخی را که الان روی این استیکر نوشته شده وارد کنید:", size=13, color="muted"))
+        day = Stepper(1, 31, st["ymd"][2], suffix=" روز", on_change=date_changed)
+        month = Stepper(texts=MONTHS, value=st["ymd"][1] - 1, wrap=True, on_change=date_changed)
+        year = Stepper(1300, 1700, st["ymd"][0], on_change=date_changed)
+        for w in (day, month, year):
+            pg.inner.add_widget(w)
+        pg.inner.add_widget(FaLabel("۲) یک متغیر را انتخاب کنید و روی نوشته‌ی مربوط در تصویر بزنید:", size=13, color="muted"))
+        slot = Stepper(texts=names, wrap=True, on_change=lambda v: (st.__setitem__("slot", v), redraw()))
+        pg.inner.add_widget(slot)
+        pg.inner.add_widget(img)
+        row = BoxLayout(size_hint_y=None, height=dp(78), spacing=dp(4))
+        cb = NeuButton("حذف این ناحیه", "plain", size=13)
+        cb.bind(on_release=clear)
+        digit_btn.bind(on_release=toggle_digits)
+        row.add_widget(cb)
+        row.add_widget(digit_btn)
+        pg.inner.add_widget(row)
+        ab = NeuButton("پیشنهاد خودکار", "plain", size=14)
+        ab.bind(on_release=auto)
+        pg.inner.add_widget(ab)
+        pg.inner.add_widget(info)
+        redraw()
+        pg.on_close = lambda: self._set_status(proj.message, "ok")
+        self.open_page(pg)
+
+    # =========================================================== پیش‌نمایش
+    def _on_slider(self, _w, v):
+        if self.proj.ok and self.proj.kind == "tgs":
+            self.frame = int(v)
+            self.refresh_preview(0.12)
+
+    def refresh_preview(self, delay: float = 0.25):
+        Clock.unschedule(self._do_preview)
+        Clock.schedule_once(self._do_preview, delay)
+
+    def _do_preview(self, *_):
+        if not self.proj.ok or self._busy:
+            return
+        if self._pv_running:
+            self._pv_dirty = True
+            return
+        self._pv_running = True
+        self._pv_dirty = False
+        jy, jm, fr = self.proj.jy, self.proj.jm, self.frame
+
+        def work():
+            try:
+                im, info = self.proj.preview(jy, jm, 1, 600, fr)
+                tex = to_texture(im)
+                self._ui(self._show_preview, tex, info)
+            except Exception as e:  # noqa: BLE001
+                self._log(e)
+                self._ui(lambda: self.pv_info.set("⚠ " + str(e)[:200], "err"))
+            finally:
+                self._pv_running = False
+                if self._pv_dirty:
+                    self._ui(self.refresh_preview, 0.05)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_preview(self, tex, info: str):
+        self._last_pv = (tex, info)
+        self.pv_img.texture = tex
+        self.pv_info.set(info)
+
+    # =========================================================== ساخت ماهانه
     def start_batch(self):
         if self._busy or not self.proj.ok:
             return
         self._busy = True
-        self.b_gen.disabled = True
-        self.b_share.disabled = True
-        self.result.text = fa("در حال ساخت …")
-        jy, jm = self.jy, self.jm
+        self.gen_btn.disabled = True
+        self._toggle(self.share_btn, False)
+        self.result.set("در حال ساخت …", "muted")
+        self.bar.value = 0
+        jy, jm = self.proj.jy, self.proj.jm
+
         def prog(i, n, _m):
-            self._ui(lambda: (setattr(self.bar, "max", n), setattr(self.bar, "value", i)))
+            self._ui(lambda: (setattr(self.bar, "maximum", n), setattr(self.bar, "value", i)))
+
         def work():
             try:
                 res = self.proj.generate(jy, jm, plat.work_dir(self.user_data_dir), prog)
-                files = [os.path.join(res.out_dir, r.filename) for r in res.results if r.ok]
-                zp = res.zip_path
-                saved_uri, where = None, ""
-                if zp:
-                    for f in files:
-                        try:
-                            plat.save_to_downloads(f, f"TelegramDateStudio/{jy}-{jm:02d}")
-                        except Exception:  # noqa: BLE001
-                            pass
-                    saved_uri, where = plat.save_to_downloads(zp)
-                self._ui(self._batch_done, res, saved_uri, where)
+                uri, where = None, ""
+                if res.zip_path:
+                    sub = f"TelegramDateStudio/{jy}-{jm:02d}"
+                    for r in res.results:
+                        if r.ok:
+                            try:
+                                plat.save_to_downloads(os.path.join(res.out_dir, r.filename), sub)
+                            except Exception as e:  # noqa: BLE001
+                                self._log(e)
+                    uri, where = plat.save_to_downloads(res.zip_path, sub)
+                self._ui(self._batch_done, res, uri, where)
             except Exception as e:  # noqa: BLE001
                 self._ui(self._batch_failed, e)
         threading.Thread(target=work, daemon=True).start()
 
     def _batch_done(self, res, uri, where):
         self._busy = False
-        self.b_gen.disabled = False
+        self.gen_btn.disabled = False
         self._zip_uri = uri
-        total = len(res.results)
-        txt = f"{res.ok_count} از {total} استیکر معتبر ساخته شد."
+        txt = f"{res.ok_count} از {len(res.results)} استیکر معتبر ساخته شد."
         if where:
             txt += f"\nذخیره شد در: {where}"
         if res.failed:
-            txt += f"\n✘ {len(res.failed)} فایل نامعتبر بود: {res.failed[0].filename}"
-        self.result.text = fa(txt)
-        self.b_share.disabled = uri is None
+            txt += f"\n✘ {len(res.failed)} فایل نامعتبر بود: {res.failed[0].filename} — {'; '.join(res.failed[0].messages)[:100]}"
+        self.result.set(txt, "err" if res.failed else "ok")
+        self._toggle(self.share_btn, uri is not None)
+        self.refresh_preview(0.1)
 
     def _batch_failed(self, e):
         self._busy = False
-        self.b_gen.disabled = False
-        self._error(e)
+        self.gen_btn.disabled = False
+        self.err(e)
 
     def share(self):
         try:
             if not plat.share_uri(self._zip_uri):
-                self.result.text = fa("ارسال فقط روی اندروید ممکن است؛ فایل در پوشه‌ی Downloads است.")
+                self.result.set("اشتراک‌گذاری فقط روی اندروید ممکن است؛ فایل‌ها در پوشه‌ی Downloads هستند.", "muted")
         except Exception as e:  # noqa: BLE001
-            self._error(e)
+            self.err(e)
+
+    def on_stop(self):
+        self.save()
 
 
 if __name__ == "__main__":

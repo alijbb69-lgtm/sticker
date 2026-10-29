@@ -8,5 +8,5 @@ for name in ("src", "assets"):
     dst = here / name
     if dst.exists():
         shutil.rmtree(dst)
-    shutil.copytree(root / name, dst, ignore=shutil.ignore_patterns("__pycache__", "ui", "*.pyc", "ui_fonts"))
+    shutil.copytree(root / name, dst, ignore=shutil.ignore_patterns("__pycache__", "ui", "*.pyc"))
 print("آماده‌ی buildozer.")

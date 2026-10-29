@@ -191,7 +191,7 @@ def system_font_dirs() -> list[str]:
         if local:
             dirs.append(os.path.join(local, "Microsoft", "Windows", "Fonts"))
     else:
-        dirs += ["/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts"),
+        dirs += ["/system/fonts", "/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts"),
                  os.path.expanduser("~/.local/share/fonts"), "/Library/Fonts"]
     return [d for d in dirs if os.path.isdir(d)]
 

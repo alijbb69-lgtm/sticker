@@ -109,3 +109,30 @@ def stale_slots(engine: RasterEngine, day_a: DayInfo, day_b: DayInfo) -> list[st
         if np.array_equal(xa[y0:y1, x0:x1], xb[y0:y1, x0:x1]):
             bad.append(s.name)
     return bad
+
+
+def annotated_image(img: Image.Image, blobs: list, assign: dict, names: list[str], current: str, width: int = 900) -> Image.Image:
+    """تصویر قالب با جعبه‌ی هر ناحیه؛ ناحیه‌ی متغیر انتخاب‌شده قرمز، بقیه‌ی نگاشت‌شده‌ها سبز، ناحیه‌های آزاد خاکستری."""
+    from PIL import ImageDraw
+    bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    bg.alpha_composite(img.convert("RGBA"))
+    s = width / max(img.size)
+    im = bg.resize((int(img.width * s), int(img.height * s)), Image.LANCZOS)
+    d = ImageDraw.Draw(im, "RGBA")
+    by_blob = {v[0]: k for k, v in assign.items()}
+    for b in blobs:
+        x0, y0, x1, y1 = (v * s for v in b.bbox)
+        own = by_blob.get(b.id)
+        if own is None:
+            d.rectangle([x0, y0, x1, y1], outline=(150, 150, 150, 170), width=2)
+        else:
+            col = (230, 40, 40, 255) if own == current else (30, 140, 90, 255)
+            d.rectangle([x0, y0, x1, y1], outline=col, width=5 if own == current else 3, fill=col[:3] + (40,))
+            d.text((x0 + 4, y0 + 2), str(names.index(own) + 1) if own in names else "?", fill=col)
+    return im
+
+
+def blob_at(blobs: list, ix: float, iy: float):
+    """ناحیه‌ای که نقطه‌ی (ix, iy) (بر حسب پیکسل تصویر) روی آن است؛ کوچک‌ترین را برمی‌گرداند."""
+    hit = [b for b in blobs if b.bbox[0] - 6 <= ix <= b.bbox[2] + 6 and b.bbox[1] - 6 <= iy <= b.bbox[3] + 6]
+    return min(hit, key=lambda b: (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1])) if hit else None
