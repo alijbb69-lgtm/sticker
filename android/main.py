@@ -64,8 +64,26 @@ def pick_ui_font() -> tuple[str, str]:
     return os.path.join(b, "DejaVuSans.ttf"), os.path.join(b, "DejaVuSans-Bold.ttf")
 
 
-_reg, _bold = pick_ui_font()
-LabelBase.register(name=ui_kit.FONT, fn_regular=_reg, fn_bold=_bold)
+_ui_gen = [0]
+
+
+def apply_ui_font(path: str = "") -> str:
+    """فونت رابط را (با نام تازه، تا کش متن‌ها قاطی نشود) ثبت می‌کند. فونت نامناسب → پیش‌فرض."""
+    reg, bold = pick_ui_font()
+    if path and os.path.exists(path) and _has_forms(path):
+        reg = bold = path
+        stem = os.path.splitext(path)
+        b2 = stem[0] + "-Bold" + stem[1]
+        if os.path.exists(b2):
+            bold = b2
+    _ui_gen[0] += 1
+    name = f"UI{_ui_gen[0]}"
+    LabelBase.register(name=name, fn_regular=reg, fn_bold=bold)
+    ui_kit.FONT = name
+    return reg
+
+
+apply_ui_font()
 
 
 class FontRow(ButtonBehavior, BoxLayout):
@@ -146,6 +164,10 @@ class DateStudio(App):
         self.crash_path = os.path.join(self.user_data_dir, "crash.log")
         st = load_state(self.state_path)
         Theme.set("dark" if st.get("theme") == "dark" else "light")
+        self.ui_font = st.get("ui_font", "")
+        self.ui_scale = float(st.get("ui_scale", 1.0))
+        apply_ui_font(self.ui_font)
+        ui_kit.SCALE = self.ui_scale
         Window.clearcolor = Theme.c("bg")
         self.proj = Project()
         self.fonts_dir = os.path.join(self.user_data_dir, "fonts")
@@ -244,7 +266,7 @@ class DateStudio(App):
         mv.open()
 
     def save(self):
-        save_state(self.proj, self.state_path, {"theme": Theme.pal.name})
+        save_state(self.proj, self.state_path, {"theme": Theme.pal.name, "ui_font": self.ui_font, "ui_scale": self.ui_scale})
 
     def _stem(self, p: str) -> str:
         return Path(p).stem
@@ -262,6 +284,9 @@ class DateStudio(App):
         titles.add_widget(FaLabel("Telegram Date Studio", size=20, bold=True, auto_h=False, wrap=False))
         titles.add_widget(FaLabel("ساخت استیکر تاریخ برای یک ماه کامل", size=12, color="muted", auto_h=False, wrap=False))
         head.add_widget(titles)
+        self.set_btn = NeuButton("⚙", "round", size=22)
+        self.set_btn.bind(on_release=lambda *_: self.page_settings())
+        head.add_widget(self.set_btn)
         self.mode_btn = NeuButton("☾" if Theme.pal.name == "light" else "☀", "round", size=22)
         self.mode_btn.bind(on_release=lambda *_: self.toggle_theme())
         head.add_widget(self.mode_btn)
@@ -329,6 +354,9 @@ class DateStudio(App):
 
     def toggle_theme(self):
         Theme.set("light" if Theme.pal.name == "dark" else "dark")
+        self.rebuild_ui()
+
+    def rebuild_ui(self):
         Window.clearcolor = Theme.c("bg")
         self.save()
         for pg in list(self.pages):
@@ -553,10 +581,10 @@ class DateStudio(App):
                         continue
                     try:
                         im = sample_image(r.path, sample, color, hpx, int(Window.width * 0.8))
-                        tex = to_texture(im)
                     except Exception:  # noqa: BLE001
                         continue
-                    self._ui(lambda r=r, tex=tex: r.set_sample(tex) if gen == st["gen"] else None)
+                    # ساخت بافت OpenGL فقط در رشته‌ی اصلی (در رشته‌ی دیگر مستطیل سیاه می‌شود)
+                    self._ui(lambda r=r, im=im: r.set_sample(to_texture(im)) if gen == st["gen"] else None)
             threading.Thread(target=work, daemon=True).start()
 
         def add_font(*_):
@@ -574,6 +602,129 @@ class DateStudio(App):
         add.bind(on_release=add_font)
         fill()
         self.open_page(pg)
+
+    # ---- تنظیمات برنامه
+    def page_settings(self):
+        pg = Page(self, "تنظیمات برنامه", scroll=True)
+        old = (self.ui_font, self.ui_scale, Theme.pal.name)
+        st = {"font": self.ui_font, "scale": self.ui_scale, "mode": Theme.pal.name}
+        inner = pg.inner
+
+        inner.add_widget(FaLabel("حالت نمایش", size=13, color="muted"))
+        inner.add_widget(SegBar(["شب", "روشن"], lambda i: st.__setitem__("mode", "dark" if i == 0 else "light"),
+                                index=0 if st["mode"] == "dark" else 1))
+        inner.add_widget(FaLabel("اندازه‌ی نوشته‌های برنامه", size=13, color="muted"))
+        scales = [0.85, 1.0, 1.2, 1.4]
+        cur = min(range(4), key=lambda i: abs(scales[i] - st["scale"]))
+        inner.add_widget(SegBar(["کوچک", "معمولی", "بزرگ", "خیلی بزرگ"],
+                                lambda i: st.__setitem__("scale", scales[i]), index=cur))
+        inner.add_widget(FaLabel("فونت برنامه (فقط فونت‌هایی که حروف فارسی را درست نشان می‌دهند):", size=13, color="muted"))
+        warn = FaLabel(" ", size=12, color="muted")
+        rows: list[FontRow] = []
+        box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        box.bind(minimum_height=box.setter("height"))
+        inner.add_widget(box)
+        inner.add_widget(warn)
+
+        def mark():
+            for r in rows:
+                r.mark(r.path == st["font"])
+
+        def pick(row):
+            st["font"] = row.path
+            mark()
+            warn.set("با «تأیید» اعمال می‌شود.", "muted")
+
+        def build_rows(paths):
+            box.clear_widgets()
+            rows.clear()
+            for p, t in [("", "پیش‌فرض برنامه")] + [(q, self._stem(q)) for q in paths]:
+                r = FontRow(p, t)
+                r.bind(on_release=pick)
+                box.add_widget(r)
+                rows.append(r)
+            mark()
+            color = tuple(int(v * 255) for v in Theme.c("text")[:3])
+
+            def work():
+                for r in list(rows):
+                    if not r.path:
+                        continue
+                    try:
+                        im = sample_image(r.path, SAMPLE_FA, color, int(sp(18)), int(Window.width * 0.8))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    self._ui(lambda r=r, im=im: r.set_sample(to_texture(im)))
+            threading.Thread(target=work, daemon=True).start()
+
+        def scan():
+            ok = [p for p in self.fonts if _has_forms(p)]
+            self._ui(build_rows, ok)
+        threading.Thread(target=scan, daemon=True).start()
+
+        add = NeuButton("افزودن فونت از حافظه‌ی گوشی …", "plain", size=14)
+
+        def add_font(*_):
+            def got(path, err):
+                if err or not path:
+                    warn.set("✘ " + (err or "فایلی انتخاب نشد"), "err")
+                    return
+                if not path.lower().endswith((".ttf", ".otf")):
+                    warn.set("✘ فقط فایل .ttf یا .otf", "err")
+                    return
+                if path not in self.fonts:
+                    self.fonts.append(path)
+                if _has_forms(path):
+                    build_rows([p for p in self.fonts if _has_forms(p)])
+                else:
+                    warn.set("این فونت برای نوشته‌های برنامه مناسب نیست (شکل‌های حروف عربی را ندارد)؛ برای استیکر قابل استفاده است.", "err")
+            self.pick_file("fonts", got)
+        add.bind(on_release=add_font)
+        inner.add_widget(add)
+
+        inner.add_widget(FaLabel("ابزارها", size=13, color="muted"))
+        reset = NeuButton("بازنشانی تنظیمات فونت/اندازه/جابه‌جایی", "plain", size=14)
+        reset.bind(on_release=lambda *_: (self.proj.reset_adjustments(), self.refresh_preview(0.1),
+                                          warn.set("بازنشانی شد.", "ok")))
+        inner.add_widget(reset)
+        logb = NeuButton("نمایش گزارش خطاهای برنامه", "plain", size=14)
+
+        def show_log(*_):
+            try:
+                txt = open(self.crash_path, encoding="utf-8").read()[-2500:] or "گزارشی ثبت نشده."
+            except Exception:  # noqa: BLE001
+                txt = "گزارشی ثبت نشده."
+            self._show_text(txt)
+        logb.bind(on_release=show_log)
+        inner.add_widget(logb)
+        inner.add_widget(FaLabel("Telegram Date Studio — نسخه‌ی اندروید ۰٫۲", size=12, color="muted", align="center"))
+
+        def closing():
+            if (st["font"], st["scale"], st["mode"]) == old:
+                return
+            self.ui_font, self.ui_scale = st["font"], st["scale"]
+            Theme.set(st["mode"])
+            apply_ui_font(self.ui_font)
+            ui_kit.SCALE = self.ui_scale
+            self.rebuild_ui()
+        pg.on_close = closing
+        self.open_page(pg)
+
+    def _show_text(self, txt: str):
+        from kivy.uix.label import Label
+        mv = ModalView(size_hint=(0.94, 0.7))
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(6))
+        lbl = Label(text=txt, font_name="Roboto", font_size=sp(10), halign="left", valign="top", size_hint_y=None)
+        lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+        lbl.bind(texture_size=lambda w, ts: setattr(w, "height", ts[1]))
+        sv = ScrollView()
+        sv.add_widget(lbl)
+        box.add_widget(sv)
+        b = NeuButton("بستن", "plain")
+        b.bind(on_release=lambda *_: mv.dismiss())
+        box.add_widget(b)
+        mv.add_widget(box)
+        mv.open()
 
     # ---- ماه و سال
     def page_month(self):
@@ -781,8 +932,7 @@ class DateStudio(App):
         def work():
             try:
                 im, info = self.proj.preview(jy, jm, 1, 600, fr)
-                tex = to_texture(im)
-                self._ui(self._show_preview, tex, info)
+                self._ui(self._show_preview, im, info)
             except Exception as e:  # noqa: BLE001
                 self._log(e)
                 self._ui(lambda: self.pv_info.set("⚠ " + str(e)[:200], "err"))
@@ -792,7 +942,8 @@ class DateStudio(App):
                     self._ui(self.refresh_preview, 0.05)
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_preview(self, tex, info: str):
+    def _show_preview(self, im, info: str):
+        tex = to_texture(im)                       # فقط در رشته‌ی اصلی
         self._last_pv = (tex, info)
         self.pv_img.texture = tex
         self.pv_info.set(info)

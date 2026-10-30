@@ -18,6 +18,7 @@ from src.mobile import neu_img
 from src.mobile.rtl import visual
 
 FONT = "UI"                      # در main.py با LabelBase.register ثبت می‌شود
+SCALE = 1.0                      # ضریب اندازه‌ی متن رابط (تنظیمات)
 
 
 class Theme:
@@ -68,9 +69,9 @@ def skin_tex(kind: str, w: int, h: int, pressed=False, enabled=True) -> Texture:
 
 
 # ---------------------------------------------------------------- متن فارسی
-def fa_wrap(text: str, max_w: float, fs: float, fn: str = FONT) -> str:
+def fa_wrap(text: str, max_w: float, fs: float, fn: str | None = None) -> str:
     """متن منطقی → رشته‌ی چندخطیِ قابل‌نمایش (شکستن خط بر پایه‌ی پهنای واقعی، سپس شکل‌دهی و ترتیب دیداری)."""
-    cl = CoreLabel(font_name=fn, font_size=fs)
+    cl = CoreLabel(font_name=fn or FONT, font_size=fs)
 
     def width(s: str) -> float:
         try:
@@ -100,7 +101,7 @@ class FaLabel(Label):
         self._wrap = wrap
         self._auto_h = auto_h
         self._ckey = color
-        self._fs = sp(size)
+        self._fs = sp(size) * SCALE
         if "size_hint" not in kw:
             kw.setdefault("size_hint_y", None if auto_h else 1)
         super().__init__(font_name=FONT, font_size=self._fs, color=Theme.c(color), halign=align, valign="middle",
@@ -341,6 +342,7 @@ class SegBar(BoxLayout):
             b = NeuButton(t, "seg", size=14)
             b.bind(on_release=lambda _b, i=i: self.select(i, True))
             self.buttons.append(b)
+        for b in reversed(self.buttons):          # راست‌به‌چپ: اولین برچسب در سمت راست
             self.add_widget(b)
         self.index = index
         self.select(index, False)
